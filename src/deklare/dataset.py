@@ -1,87 +1,85 @@
+import traceback
+from typing import Any, Callable, Iterable, TypeVar
+
 import numpy as np
-import pandas as pd
+
+try:
+    import torch
+except Exception:
+    RuntimeWarning("Failed to load torch. Install it to use threaded (pre-)loading of datasets")
+
+
 from tqdm import tqdm
 
-from .utils import (
-    NodeFailedException,
-    get_segments,
-)
+from .descriptor import Descriptor
+from .utils import NodeFailedError
 
-import traceback
-
-
-def get_dataset_segments(
-    catalog, segment_slice="60 seconds", segment_stride="60 seconds", mode="overlap", reference=None
-):
-    mode = {"time": mode}
-    segment_slice = {"time": pd.to_timedelta(segment_slice)}
-    segment_stride = {"time": pd.to_timedelta(segment_stride)}
-    classification_segments = []
-
-    for catalog_item in catalog:
-        if "station" not in catalog_item:
-            continue
-
-        non_sliced_segment = {
-            "time": {
-                "start": catalog_item["time"]["start"],
-                "end": catalog_item["time"]["end"],
-            },
-        }
-
-        segments = get_segments(
-            non_sliced_segment,
-            segment_slice,
-            segment_stride,
-            reference=reference,
-            mode=mode,
-            timestamps_as_strings=True,
-            minimal_number_of_segments=1,
-        )
-
-        for segment in segments:
-            segment["station"] = catalog_item["station"]
-            segment["network"] = catalog_item["network"]
-            segment["location"] = catalog_item["location"]
-            segment["channel"] = catalog_item["channel"]
-
-        classification_segments += segments
-
-    return classification_segments
+DatasetIdx = TypeVar("DatasetIdx", int, tuple[int, int], tuple[int, Iterable[int]])
 
 
 class Dataset:
+    """dataset class to gather data from multiple flows and descriptors
+
+    Attributes:
+        singleton (bool): True if only one flow
+        flows (list[Callable]): list of flows to gather data from
+        transforms (list[Callable]): list of additional tranforms to apply to data from flow
+        dataset_descriptors (list[Descriptor]): descriptors that can be used to query the data
+        indices (list[int]): potentially valid indices of descriptors
+        valid_indices (set[int]): cache which indices are valid
+        invalid_indices (set[int]): cache which indices are invalid
+    """
+
+    singleton: bool
+    flows: list[Callable]
+    transforms: list[Callable]
+    dataset_descriptors: list[Descriptor]
+    indices: list[int]
+    valid_indices: set[int]
+    invalid_indices: set[int]
+
     def __init__(
         self,
-        deskriptors,
-        flows,
-        transforms=None,
-    ):
+        descriptors: list[Descriptor],
+        flows: list[Callable] | Callable,
+        transforms: list[Callable] | Callable | None = None,
+    ) -> None:
         self.singleton = False
-
         if not isinstance(flows, list):
             self.singleton = True
             flows = [flows]
 
-        self.dataset_deskriptors = np.array(deskriptors)
         self.flows = flows
 
-        self.indices = np.arange(len(deskriptors)).tolist()
-
-        self.invalid_indices = {}
-        self.valid_indices = {}
+        if not isinstance(transforms, list):  # assume same transform for all flows
+            transforms = [transforms] * len(self.flows)
 
         self.transforms = transforms
 
+        self.dataset_descriptors = descriptors
+        self.indices = range(len(descriptors))
+
+        self.invalid_indices = set()
+        self.valid_indices = set()
+
     @property
-    def deskriptors(self):
-        return self.dataset_deskriptors[self.indices]
+    def descriptors(self) -> Descriptor:
+        return self.dataset_descriptors[self.indices]
 
-    def mask_invalid(self):
-        local_dict = self.invalid_indices
-        self.indices = [x for x in self.indices if x not in local_dict]
+    def mask_invalid(self) -> None:
+        """remove certainly invalid indices"""
+        self.indices = [x for x in self.indices if x not in self.invalid_indices]
 
-    def valid(self, idx):
+    # ToDo: check if this needs to be so complicated
+    def valid(self, idx: int) -> bool:
+        """check validity of index for dataset
+
+        Args:
+            idx (int): index to check
+
+        Returns:
+            bool: True if index is valid, False if invalid
+        """
         if idx in self.valid_indices:
             return True
         if idx in self.invalid_indices:
@@ -91,21 +89,28 @@ class Dataset:
         # so let's do it
         try:
             result = self.__getitem__(idx, only_validity=True)
-            if isinstance(result, NodeFailedException):
+            if isinstance(result, NodeFailedError):
+                self.invalid_indices.add(idx)
                 return False
-            if isinstance(result, tuple):
-                return all(
-                    [not isinstance(item, NodeFailedException) for item in result]
-                )
+            elif isinstance(result, tuple):
+                return all([not isinstance(item, NodeFailedError) for item in result])
+
+            self.valid_indices.add(idx)
             return True
-        except Exception as e:
+        except Exception:
             tqdm.write(traceback.format_exc())
             return False
 
-    def __len__(self):
+    def __len__(self) -> int:
+        """returns length of dataset"""
         return len(self.indices)
 
-    def __getitem__(self, idx, only_validity=False):
+    def __getitem__(self, idx: DatasetIdx) -> Any | tuple[Any]:  # noqa: ANN401
+        """make dataset indexable
+
+        Args:
+            idx (DatasetIdx): index of descriptor, if tuple second element chooses flow(s)
+        """
         singleton = self.singleton
 
         stream_select = np.arange(len(self.flows))
@@ -117,18 +122,15 @@ class Dataset:
 
         internal_idx = self.indices[idx]
 
-        deskriptor = self.dataset_deskriptors[internal_idx]
+        descriptor = self.dataset_descriptors[internal_idx]
         out = []
         for stream in stream_select:
             # check if dataset was persisted before
             values = None
-            values = self.flows[stream].query(deskriptor)
+            values = self.flows[stream].query(descriptor)
 
-            if isinstance(self.transforms, list):
-                if self.transforms[stream] is not None:
-                    values = self.transforms[stream](values)
-            elif self.transforms is not None:
-                values = self.transforms(values)
+            if self.transforms[stream] is not None:
+                values = self.transforms[stream](values)
 
             out.append(values)
 
@@ -137,20 +139,25 @@ class Dataset:
 
         return tuple(out)
 
-    def check_validity(self, batch_size=1, num_workers=0):
-        temp_transforms = self.transforms
+    def check_validity(self, batch_size: int = 1, num_workers: int = 0) -> None:
+        """checks which indices are valid for dataset using pytorch
+
+        Args:
+            batch_size (int): batch size to use when checking index validity. defaults to 1
+            num_workers (int): number of workers to use when checking index validity
+                defaults to 0 (as many workers as cores)
+        """
+        tmp_transforms = self.transforms
         self.transforms = None
 
         this = self
 
         class TmpClass:
-            def __getitem__(self, idx):
+            def __getitem__(self, idx: int) -> tuple:
                 return (idx, this.valid(idx))
 
-            def __len__(self):
+            def __len__(self) -> int:
                 return len(this)
-
-        import torch
 
         for batch in tqdm(
             torch.utils.data.dataloader.DataLoader(
@@ -166,33 +173,31 @@ class Dataset:
             # and not within the possibly parallelized self.valid() calls
             for idx, valid in batch:
                 if valid:
-                    self.valid_indices[idx] = True
+                    self.valid_indices.add(idx)
                 else:
-                    self.invalid_indices[idx] = True
+                    self.invalid_indices.add(idx)
 
-        self.transforms = temp_transforms
+        self.transforms = tmp_transforms
 
-    def preload(self, batch_size=1, num_workers=0):
-        """Using pytorch to preload this dataset, i.e. run through the whole dataset once.
-        The caching/persisting will happen inside the individual flows
-
+    def preload(self, batch_size: int = 1, num_workers: int = 0) -> None:
+        """Using pytorch to preload this dataset, i.e. run through the whole dataset once
+        the caching/persisting will happen inside the individual flows
 
         Args:
-            batch_size (int, optional): batch size for loading. Defaults to 1.
-            num_workers (int, optional): number of parallel workers. Defaults to 0.
+            batch_size (int): batch size for loading. defaults to 1
+            num_workers (int): number of parallel workers. defaults to 0
         """
         temp_transforms = self.transforms
         self.transforms = None
-        import torch
 
-        for item in tqdm(
+        for _ in tqdm(
             torch.utils.data.dataloader.DataLoader(
                 self,
                 batch_size=batch_size,
                 num_workers=num_workers,
                 drop_last=False,
                 shuffle=False,
-                collate_fn=lambda x: [],
+                collate_fn=lambda _: [],
             )
         ):
             continue
