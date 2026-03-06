@@ -25,6 +25,7 @@ from dask.delayed import Delayed
 from dask.typing import Graph
 from pandas._libs.tslibs.nattype import NaTType
 from pandas.core.tools.datetimes import DatetimeScalar
+from datetime import datetime 
 
 from .core import KEY_SEP
 from .descriptor import DatetimeRange, Descriptor, Range

@@ -226,7 +226,7 @@ class DataContainer(ABC):
 
     @classmethod
     @abstractmethod
-    def merge(cls, *elements: Self) -> Self:
+    def merge(cls, *elements: Self, descriptor: Descriptor) -> Self:
         """merge the elements into a single DataContainer instance
         if no elements are passed return an empty container, if only one is passed acts as the identity function
 
@@ -341,7 +341,7 @@ class XArrayContainer(DataContainer):
         return item
 
     @classmethod
-    def merge(cls, *elements: Self) -> Self:
+    def merge(cls, *elements: Self, descriptor: Descriptor) -> Self:
         """merge the elements into a single XArrayContainer instance
         if no elements are passed return an empty container, if only one is passed acts as the identity function
 

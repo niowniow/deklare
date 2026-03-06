@@ -230,6 +230,12 @@ class Descriptor(BaseModel, validate_assignment=True):
         """
         kwargs = {}
 
+        if isinstance(data,cls):
+            return data
+        
+        if isinstance(data,Descriptor):
+            data = data.to_dict()
+        
         data = _transform_to_nested(data)
 
         for key, value in data.items():

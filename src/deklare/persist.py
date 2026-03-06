@@ -50,20 +50,31 @@ def file_in_store(store,data_path):
             # The list was empty, so the path truly does not exist
             return False
 
-from obstore.store import LocalStore
+from pathlib import Path
+# Assuming obstore is your library
+import obstore 
+
 def make_sub_store(parent_store, sub_path: str):
-    """
-    Creates a new LocalStore instance rooted inside the parent_store's prefix.
-    """
-    # 1. Get the current prefix (defaulting to empty string if None)
-    # obstore stores prefix as a Path object or None
-    current_prefix = getattr(parent_store, "prefix", None) or ""
+    # 1. Handle Prefix logic
+    current_prefix = getattr(parent_store, "prefix", "") or ""
+    new_prefix = str(Path(current_prefix) / sub_path)
     
-    # 2. Join the old prefix with the new sub-path
-    # We use pathlib to handle slash consistency automatically
-    new_prefix = Path(current_prefix) / sub_path    
-    # 3. Return a NEW instance pointing to this deeper folder
-    return LocalStore(prefix=new_prefix,mkdir=True)
+    # 2. Identify the Class
+    StoreClass = type(parent_store)
+    
+    # 3. Build configuration
+    config = {}
+    if hasattr(parent_store, "bucket"):
+        config["bucket"] = parent_store.bucket
+    elif hasattr(parent_store, "root"):
+        config["root"] = parent_store.root
+
+    # 4. Specific check for LocalStore
+    # We use isinstance to handle potential subclasses as well
+    if isinstance(parent_store, obstore.store.LocalStore):
+        config["mkdir"] = True
+        
+    return StoreClass(**config, prefix=new_prefix)
 
 @task()
 class Persister:
@@ -187,7 +198,8 @@ class Persister:
 
             if self.store is None:
                 return data
-
+            data = self.data_container(data)
+            
             try:
                 # in this case we assume that the second element is additional metadata for the STAC item
                 item_metadata = data.get_stac_metadata() or {}
@@ -199,14 +211,14 @@ class Persister:
                     #     data.write(f)
                     failed_path = "fail/" + descriptor["descriptor_hash"]
                     substore = make_sub_store(self.store,failed_path)
-                    data.write(substore,copy_data=True)
+                    data.write(substore)
                 else:
                     if isinstance(data, str):
                         raise RuntimeError(f"something wrong {data}")
 
                     try:
                         substore = make_sub_store(self.store,data_path)
-                        data.write(substore,copy_data=True)
+                        data.write(substore)
                     except Exception as e:
                         # self.store.dirfs.rm(data_path)
                         raise e
@@ -529,7 +541,7 @@ class ChunkPersister:
                     stac_io=self.stac_io,
                 )
 
-        section = self.data_container.merge(*success)
+        section = self.data_container.merge(*success,descriptor)
         return section
 
     @staticmethod

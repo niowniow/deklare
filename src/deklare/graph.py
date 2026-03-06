@@ -142,7 +142,7 @@ def configuration(  # noqa: C901
     # descriptor = deepcopy(descriptor)
     clone_input = False
     if isinstance(descriptors, list) and len(work) == 1:
-        descriptors = {k: descriptors for k in work}
+        descriptor_map = {k: descriptors for k in work}
         clone_input = True
     elif isinstance(descriptors, list) and len(work) != 1:
         # descriptor = [NestedFrozenDict(r) for r in descriptor if r]
@@ -154,13 +154,11 @@ def configuration(  # noqa: C901
                 "as the number of keys/outputs"
             )
 
-        descriptors = [d for d in descriptors if d]
-
         # For each output node different descriptor has been provided
-        descriptors = {work[i]: [descriptors[i]] for i in range(len(descriptors))}
+        descriptor_map = {work[i]: [descriptors[i]] for i in range(len(descriptors))}
     else:
         # Every output node receives the same descriptor
-        descriptors = {k: [descriptors] for k in work}
+        descriptor_map = {k: [descriptors] for k in work}
 
     input_descriptors = {}
     # create a new graph with the configured nodes of the old graph
@@ -232,7 +230,7 @@ def configuration(  # noqa: C901
             dsk_k[DESCRIPTOR] = (descriptor,)
             dsk_dict[clone_k] = tuple(dsk_k)
 
-            descriptors[clone_k] = (descriptor,)
+            descriptor_map[clone_k] = (descriptor,)
             keys += [clone_k]
 
     remove = {k: False for k in work}
@@ -242,7 +240,7 @@ def configuration(  # noqa: C901
 
         out_keys += work
         for key in work:
-            if key not in descriptors:
+            if key not in descriptor_map:
                 raise InternalError(f"Failed to find descriptor for node {key}")
 
             # check if we have collected all dependencies so far
@@ -264,15 +262,15 @@ def configuration(  # noqa: C901
             # Check if we get a node of type Node class
             if argument_is_node:
                 # have a node class so we can use it's configure function
-                assert len(descriptors[key]) == 1
+                assert len(descriptor_map[key]) == 1
                 new_descriptor = dsk_dict[key][1].__self__.configure(
-                    descriptors[key][0]
+                    descriptor_map[key][0]
                 )  # configure the descriptor for the class
             else:
                 # no Node class => no custom configuration function => pass through
                 new_descriptor = Descriptor()
-                assert len(descriptors[key]) == 1
-                r = descriptors[key][0]
+                assert len(descriptor_map[key]) == 1
+                r = descriptor_map[key][0]
 
                 # sanitize descriptor
                 if r is not None:
@@ -324,7 +322,7 @@ def configuration(  # noqa: C901
                     k_in_keys = []
                 else:
                     for dep in current_deps:
-                        if descriptors.get(dep, []):
+                        if descriptor_map.get(dep, []):
                             clone = True
                             k_in_keys = []
 
@@ -356,7 +354,7 @@ def configuration(  # noqa: C901
                         pre_k = tokenize([key, "deklare_pre", clone_id])
                         if hasattr(pre_function, "__self__") and hasattr(pre_function.__self__, "dask_key_name"):
                             pre_k = pre_function.__self__.dask_key_name + KEY_SEP + pre_k
-                        descriptors[pre_k] = (pre_descriptor,)
+                        descriptor_map[pre_k] = (pre_descriptor,)
                         dsk_dict[pre_k] = [apply, pre_function, [], {}]
                         pre_in_keys = []
 
@@ -433,18 +431,18 @@ def configuration(  # noqa: C901
                         if not descriptor._deklare_attrs.get("remove_dependency", True):
                             # clean up if an empty dict still exists
                             del descriptor._deklare_attrs["remove_dependency"]
-                        if dep in descriptors:
+                        if dep in descriptor_map:
                             if clone_instead_merge:
                                 raise InternalError(
                                     f"A duplicate descriptor was found for {dep} with the descriptor \
 {descriptor[dep]}, set clone_instead_merge=False to allow this"
                                 )
                             if not to_be_removed:
-                                descriptors[dep] += [descriptor]
+                                descriptor_map[dep] += [descriptor]
                             remove[dep] = remove[dep] and to_be_removed
                         else:
                             if not to_be_removed:
-                                descriptors[dep] = [descriptor]
+                                descriptor_map[dep] = [descriptor]
                             # if we received None
                             remove[dep] = to_be_removed
 

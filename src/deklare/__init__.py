@@ -68,7 +68,10 @@ def deklare_flow(
             )
 
         if template_descriptor:
-            descriptor = template_descriptor.from_dict(descriptor.to_dict())
+            if isinstance(descriptor,(tuple,list)):
+                descriptor = [template_descriptor.from_dict(d) for d in descriptor]
+            else:
+                descriptor = template_descriptor.from_dict(descriptor)
 
         return compute(flow_graph, descriptor, plan=plan)
 
